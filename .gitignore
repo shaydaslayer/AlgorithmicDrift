@@ -1,0 +1,28 @@
+# virtual environments
+venv/
+venv39/
+.venv/
+
+# python cache
+__pycache__/
+*.pyc
+
+# logs / tensorboard
+log/
+log_processes/
+log_tensorboard/
+src/2.0-RecModules/log/
+src/2.0-RecModules/log_processes/
+src/2.0-RecModules/log_tensorboard/
+src/2.0-RecModules/start/log/
+src/2.0-RecModules/start/log_processes/
+src/2.0-RecModules/start/log_tensorboard/
+
+# generated / processed data
+data/processed/
+*.npy
+*.tsv
+
+# mac junk
+__MACOSX/
+.DS_Store

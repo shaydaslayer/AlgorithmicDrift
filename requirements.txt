@@ -7,12 +7,12 @@ scikit-learn==1.6.1
 numpy==1.22.3
 pandas==1.4.2
 scipy==1.8.0
-recbole==1.0.1 --no-dependencies
+recbole==1.0.1 --no-deps
 colorlog==6.9.0
 tensorboard==2.18.0
 colorama==0.4.6
 pyyaml==6.0.2
 igraph==0.9.11
 pycairo==1.27.0
-networkx==3.4.2
+networkx==2.8
 seaborn==0.13.2

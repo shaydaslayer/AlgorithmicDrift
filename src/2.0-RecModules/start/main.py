@@ -10,7 +10,7 @@ from os.path import exists
 import subprocess
 
 def handle_processes(cmd, thread):
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen(cmd, cwd=os.path.dirname(__file__), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     print("Started process {} with cmd = {}".format(thread, cmd))
 
 
@@ -37,14 +37,14 @@ if SYNTHETIC == "True":
     path = "../../data/processed/"
     folder = "SyntheticDataset/History/"
 else:
-    path = "../../data/processed/"
-    folder = "movielens-1m/"
+    path = r"C:\Users\patel\Streaming-Recommender-Algorithmic-Drift\data\processed\\"
+    folder = "movielens-1m"
 
 if not exists(path):
     os.makedirs(path)
 
-if not exists(path + folder):
-    os.makedirs(path + folder)
+if not exists(os.path.join(path, folder)):
+    os.makedirs(os.path.join(path, folder))
 
 gpu_id = "cpu"
 
@@ -83,12 +83,12 @@ sigma = "0.01,0.01,0.01,0.01,0.01,0.01,0.01"
 
 eta_random = "0.0"
 
-program_to_call = 'start/handle_modules.py'
+program_to_call = os.path.abspath(os.path.join(os.path.dirname(__file__), 'handle_modules.py'))
 
 if not exists('log_processes'):
     os.makedirs('log_processes')
 
-process_args_1 = ["python",
+process_args_1 = [sys.executable,
               program_to_call,
               path,
               folder,
@@ -101,7 +101,7 @@ process_args_1 = ["python",
               gpu_id,
               c, gamma, sigma, eta_random, introduce_bias, target, influence_percentage]
 
-process_args_2 = ["python",
+process_args_2 = [sys.executable,
               program_to_call,
               path,
               folder,

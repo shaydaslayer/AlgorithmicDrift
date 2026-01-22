@@ -239,25 +239,15 @@ class RecVAE(GeneralRecommender):
             self.device).repeat(
             users.shape[0],
             self.n_items)  # self.get_rating_matrix(users)
-
         users = users - 1
 
-        if self.device == 'cuda':
-            col_indices = items[users].flatten().cuda()
-        else:
-            col_indices = items[users].flatten()
-        row_indices = torch.arange(
-            users.shape[0]).to(
-            self.device).repeat_interleave(
-            items.shape[1],
-            dim=0)
+        col_indices = items[users].flatten().to(self.device).long()
+        row_indices = torch.arange(users.shape[0], device=self.device).repeat_interleave(items.shape[1]).long()
 
-        if self.device == 'cuda':
-            rating_matrix.index_put_(
-                (row_indices, col_indices), values.flatten().cuda())
-        else:
-            rating_matrix.index_put_(
-                (row_indices, col_indices), values.flatten())
+        rating_matrix.index_put_(
+            (row_indices, col_indices),
+            values.flatten().to(self.device)
+        )
 
         scores, _, _, z = self.forward(rating_matrix, self.dropout_prob)
 

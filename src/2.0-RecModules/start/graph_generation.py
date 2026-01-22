@@ -432,6 +432,10 @@ def generate_graphs(
          category=scipy.sparse.SparseEfficiencyWarning)
 
     print("NUM ITEMS", num_items)
+    # hard cap for quick runs
+    d = min(d, 15)
+    B = min(B, 1)   # optional: also cap B so it only does 1 outer run
+
     SYNTHETIC = args["synthetic"]
 
     model_users = np.array(users) + 1
