@@ -7,12 +7,19 @@ current = os.path.dirname(os.path.realpath(__file__))
 parent = os.path.dirname(current)
 sys.path.append(parent)
 
+
+import numpy as np
+import copy
 from scipy.sparse import lil_matrix
 from scipy.spatial.distance import cdist
 import scipy
 from sklearn.preprocessing import normalize
 import time
 from scipy.stats import beta
+
+import csv
+import math
+from collections import Counter
 
 from recbole.data.utils import *
 from utils.model_utils import load_model
@@ -21,6 +28,166 @@ def softmax(x):
     """Compute softmax values for each sets of scores in x."""
     e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
+
+
+def safe_entropy(p, eps=1e-12):
+    """Shannon entropy of a probability vector (natural log)."""
+    p = np.asarray(p, dtype=float)
+    p = p[p > 0]
+    if p.size == 0:
+        return 0.0
+    return float(-(p * np.log(p + eps)).sum())
+
+def category_entropy_from_items(items_zero_based, item_label_dict):
+    """Compute entropy over categories for a list/array of item indices (0-based)."""
+    if item_label_dict is None:
+        return None
+    cats = [item_label_dict.get(int(it), None) for it in items_zero_based]
+    cats = [c for c in cats if c is not None]
+    if len(cats) == 0:
+        return 0.0
+    uniq, counts = np.unique(cats, return_counts=True)
+    p = counts / counts.sum()
+    return safe_entropy(p)
+
+def diversity_rerank_topk(items_1based, scores_probs, item_label_dict, lambda_diversity=0.3):
+    """Greedy rerank to increase category diversity while keeping high-score items early.
+
+    items_1based: numpy array of shape (topk,)
+    scores_probs: numpy array of shape (topk,) (not necessarily normalized)
+    """
+    if item_label_dict is None or lambda_diversity <= 0:
+        return items_1based, scores_probs
+
+    items_1based = np.asarray(items_1based).copy()
+    scores_probs = np.asarray(scores_probs).copy()
+
+    # Map to categories; unknown category treated as its own bucket
+    cats = [item_label_dict.get(int(it - 1), "UNK") for it in items_1based]
+
+    selected = []
+    selected_scores = []
+    seen_cats = set()
+
+    # Normalize scores to [0,1] for stable mixing
+    s = scores_probs.astype(float)
+    if np.max(s) > np.min(s):
+        s_norm = (s - np.min(s)) / (np.max(s) - np.min(s))
+    else:
+        s_norm = np.ones_like(s)
+
+    remaining = list(range(len(items_1based)))
+    while remaining:
+        best_idx = None
+        best_val = -1e18
+        for ridx in remaining:
+            cat = cats[ridx]
+            novelty = 1.0 if cat not in seen_cats else 0.0
+            val = (1 - lambda_diversity) * s_norm[ridx] + lambda_diversity * novelty
+            if val > best_val:
+                best_val = val
+                best_idx = ridx
+        selected.append(items_1based[best_idx])
+        selected_scores.append(scores_probs[best_idx])
+        seen_cats.add(cats[best_idx])
+        remaining.remove(best_idx)
+
+    return np.array(selected), np.array(selected_scores)
+
+def init_metrics_file(metrics_path):
+    if not os.path.exists(os.path.dirname(metrics_path)):
+        os.makedirs(os.path.dirname(metrics_path))
+    if not os.path.exists(metrics_path):
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            f.write("iter_b,step_d,user,topk_cat_entropy,history_cat_entropy,chosen_item,chosen_cat\\n")
+
+
+def category_entropy(items_1idx, item_label_dict):
+    """
+    items_1idx: list/array of item ids in [1..num_items]
+    item_label_dict: maps item 0-index -> category label
+    """
+    if items_1idx is None or len(items_1idx) == 0 or item_label_dict is None:
+        return 0.0
+
+    cats = []
+    for it in items_1idx:
+        it0 = int(it) - 1
+        if it0 in item_label_dict:
+            cats.append(item_label_dict[it0])
+
+    if len(cats) == 0:
+        return 0.0
+
+    counts = Counter(cats)
+    total = sum(counts.values())
+    ent = 0.0
+    for c in counts.values():
+        p = c / total
+        ent -= p * math.log(p + 1e-12)
+
+    return ent
+
+
+def normalized_entropy(items_1idx, item_label_dict):
+    """
+    Normalized entropy in [0..1]. 0 => single-category bubble, 1 => maximally diverse.
+    """
+    if items_1idx is None or len(items_1idx) == 0 or item_label_dict is None:
+        return 0.0
+
+    cats = []
+    for it in items_1idx:
+        it0 = int(it) - 1
+        if it0 in item_label_dict:
+            cats.append(item_label_dict[it0])
+
+    unique = len(set(cats))
+    if unique <= 1:
+        return 0.0
+
+    ent = category_entropy(items_1idx, item_label_dict)
+    return ent / (math.log(unique + 1e-12))
+
+
+def mmr_diversity_rerank(user_recs_1idx, scores_probs, item_label_dict, lambda_div=0.5):
+    """
+    Re-rank Top-K to penalize repeated categories.
+    - user_recs_1idx: array/list of item ids in [1..num_items]
+    - scores_probs: probabilities aligned with user_recs_1idx
+    - lambda_div: 0..1 (higher => more diversity pressure)
+    Returns: reordered np.array of item ids (same length)
+    """
+    recs = list(user_recs_1idx)
+    probs = list(scores_probs)
+
+    # relevance-first initial order
+    candidates = sorted(zip(recs, probs), key=lambda x: float(x[1]), reverse=True)
+
+    selected = []
+    seen_cats = set()
+
+    while len(candidates) > 0:
+        best_idx = 0
+        best_score = -1e18
+
+        for idx, (it, p) in enumerate(candidates):
+            cat = item_label_dict.get(int(it) - 1, None)
+            penalty = 1.0 if (cat is not None and cat in seen_cats) else 0.0
+            score = (1.0 - lambda_div) * float(p) - lambda_div * penalty
+
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        it, p = candidates.pop(best_idx)
+        selected.append(int(it))
+        cat = item_label_dict.get(int(it) - 1, None)
+        if cat is not None:
+            seen_cats.add(cat)
+
+    return np.array(selected, dtype=np.int64)
+
 
 def normalize_T(T, B):
     T /= B
@@ -438,6 +605,13 @@ def generate_graphs(
 
     SYNTHETIC = args["synthetic"]
 
+    # --- NOVEL METRICS TOGGLE (safe default) ---
+    # If args does not contain this flag, default to False (no metrics logging)
+    log_metrics = False
+    if args is not None:
+        log_metrics = bool(args.get("log_metrics", False))
+
+
     model_users = np.array(users) + 1
     model_items = list(history_dataset.values())
     model_items = [np.array(y) + 1 for y in model_items]
@@ -482,6 +656,18 @@ def generate_graphs(
 
 
     graphs_folder += "/"
+
+    # --- NOVEL: enable diversity rerank + bubble metrics logging ---
+    enable_diversity_rerank = False
+    lambda_div = 0.5
+    if args is not None:
+        enable_diversity_rerank = bool(args.get("diversity_rerank", False))
+        lambda_div = float(args.get("lambda_div", 0.5))
+
+    metrics_path = os.path.join(graphs_folder, "bubble_metrics.csv")
+    write_header = not os.path.exists(metrics_path)
+# --------------------------------------------------------------
+
     
     a_list = []
     b_list = []
@@ -596,6 +782,13 @@ def generate_graphs(
                             if idx_to_add >= len(items_target_to_add):
                                 break
 
+
+                    # Novel extension: diversity-aware reranking of the Top-K list (optional)
+                    if enable_diversity_rerank and item_label_dict is not None:
+                        user_recommendations, scores_probs = diversity_rerank_topk(
+                            user_recommendations, scores_probs, item_label_dict, lambda_diversity=lambda_diversity
+                        )
+
                     if c < 1:
 
                         organic_user_preferences = np.array(
@@ -621,6 +814,15 @@ def generate_graphs(
                         combination_probs /= np.sum(combination_probs)
 
                     item_sampled = np.random.choice(user_recommendations, p=combination_probs)
+
+
+                    # Metrics logging (optional): category entropy of Top-K and of the user's history (a simple "filter-bubble" proxy)
+                    if log_metrics and item_label_dict is not None:
+                        topk_ent = category_entropy_from_items(user_recommendations - 1, item_label_dict)
+                        hist_ent = category_entropy_from_items(np.array(temp_histories[i]) - 1, item_label_dict)
+                        chosen_cat = item_label_dict.get(int(item_sampled - 1), "UNK")
+                        with open(metrics_path, "a", encoding="utf-8") as mf:
+                            mf.write(f"{iter_b},{j},{i},{topk_ent},{hist_ent},{int(item_sampled)},{chosen_cat}\n")
 
                 if introduce_bias:
                     items_target_to_take_d[i] = list(set(items_target_to_take_d[i]) - {item_sampled - 1})
